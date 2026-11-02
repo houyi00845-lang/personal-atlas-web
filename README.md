@@ -1,2 +1,64 @@
-# personal-atlas-web
-Open-source personal knowledge atlas with server-side authentication and private storage. No personal dataset included.
+# Personal Atlas Web
+
+一个可以公开代码、私有保存内容的个人知识库。登录页、知识图谱、全文搜索、月度档案、成长总览和资料管理共用一个网址。桌面端为分栏阅读，移动端使用折叠菜单。
+
+本仓库仅包含程序与合成测试数据，不包含真实个人记录、密码或历史资料快照。已有含真实资料的仓库应继续保持私有；不要将旧仓库直接改成公开。
+
+## 工作方式
+
+- Cloudflare Worker 提供网页，并验证访问权限。
+- 密码使用带独立随机盐的 PBKDF2-SHA256 验证器保存。
+- 随机会话使用 Secure、HttpOnly、SameSite=Strict Cookie，最多有效十二小时。
+- 私有资料和会话保存在 SQLite-backed Durable Object 中，不是公开静态文件。
+- 所有数据接口都检查登录状态；修改操作还检查请求来源。
+- 密码失败尝试受到持久化限流约束。退出登录后，服务器立即注销该会话；修改密码后，所有会话失效。
+- 导入资料时保留最近五个服务器版本，资料本身保留原有月度档案与历史状态。
+
+## 检查
+
+Node.js 22.13 或更高版本：
+
+```sh
+npm test
+npm run check:public
+```
+
+测试使用 Node 自带 SQLite 和合成数据，不需要真实资料或账号。`src/worker.mjs` 使用 Cloudflare Runtime 提供的 DurableObject；测试覆盖独立的路由与存储逻辑。
+
+## 部署与初始化
+
+1. 在 Cloudflare Workers 中连接这个 GitHub 仓库，使用根目录构建与部署；部署命令为 `npx wrangler deploy`。也可安装依赖后使用 `npm run deploy`。
+2. 配置名为 `BOOTSTRAP_KEY` 的 **Secret**，使用至少 32 个字符的随机值。不要把它写进仓库、普通环境变量或聊天中。
+3. 打开部署网址的 `/setup`，由网站所有者亲自输入初始化密钥，设置自己的长密码。初始化完成后，此入口会拒绝再次初始化。
+4. 在 `/settings` 导入私有知识库 JSON。未导入时，阅读页会引导进入资料管理。
+5. 初始化成功后可在托管后台移除 `BOOTSTRAP_KEY`，正常登录只使用私有存储中的密码验证器。
+
+没有配置初始化密钥时，网站保持锁定，不会允许任何访问者抢先设置密码。密码的设置、修改以及账户授权应由所有者本人完成。
+
+`wrangler.jsonc` 使用 SQLite-backed Durable Object migration 和 Worker-first 静态资源路由；无需额外创建数据库 ID。不要重命名 `AtlasVault` 类或删除其 migration，避免影响已有资料存储。一个生产 Worker 对应一个独立知识库。
+
+可先使用部署平台提供的 `workers.dev` 网址；如已有自己的域名，可在 Worker 的 Domains & Routes 设置中绑定。公开代码与网站资料访问权限是两回事，GitHub Pages 无法运行这个服务端。
+
+## 从旧静态版本迁移
+
+将旧 `data.js` 转成 JSON，输出位置必须在仓库外，或位于被忽略的 `.private/` 中：
+
+```sh
+node scripts/export-private.mjs /absolute/path/to/data.js /private/location/atlas.json "显示名" "知识库名称"
+```
+
+随后由已登录的所有者在资料管理中上传。不要把导出文件、旧的 `content/` 文件夹、真实资料截图、Cookie 或任何密钥提交到公开仓库。
+
+## 安全边界与维护
+
+这套方案仍有三项必须长期处理的风险：
+
+1. **发布历史泄露**：公开仓库必须从干净历史开始；删除当前文件不能清除旧提交中已经公开的资料。
+2. **账号与密码失守**：知道访问密码的人可以读取资料。托管账号和 GitHub 账号拥有更高权限，应使用多因素验证；不要重复使用密码。
+3. **资料丢失与恢复**：五份服务器版本不能替代离线备份。每次重要更新后下载备份，并保持原私有资料仓库。遗失访问密码时，需要通过托管账号安全维护密码验证器；不要用公开的无验证重置接口。
+
+本应用不记录密码、请求体或资料到应用日志，也不接入统计脚本。托管服务仍可能保留其基础设施层面的运行记录。已合法读取或下载的内容无法被远程收回；退出登录后请关闭共享设备上的页面与下载文件。
+
+## 运行环境验证范围
+
+自动测试验证 Node SQLite 中的权限、限流、版本与会话行为；上线后还需验证 Cloudflare 绑定、首次初始化、资料导入、匿名访问拦截以及手机和桌面显示。正式部署成功前，不应宣称独立网址已经启用。

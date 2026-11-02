@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "personal-atlas-web",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-11-02",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "VAULT", "class_name": "AtlasVault" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AtlasVault"] }],
+  "observability": { "enabled": false }
+}

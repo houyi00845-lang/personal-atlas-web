@@ -1,0 +1,15 @@
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
+const [input, output, displayName = '我', siteName = '个人知识库'] = process.argv.slice(2);
+if (!input || !output) throw new Error('Usage: node scripts/export-private.mjs INPUT_DATA_JS OUTPUT_JSON [DISPLAY_NAME] [SITE_NAME]');
+const source = await readFile(resolve(input), 'utf8');
+const prefix = 'window.ATLAS_DATA = ';
+if (!source.startsWith(prefix)) throw new Error('Unsupported data format');
+const atlas = JSON.parse(source.slice(prefix.length).trim().replace(/;$/, ''));
+atlas.profile = { displayName, siteName };
+const target = resolve(output);
+const here = resolve(new URL('..', import.meta.url).pathname);
+if (target.startsWith(here + '/') && !target.startsWith(resolve(here, '.private') + '/')) throw new Error('Private export must be outside the public repository, or inside ignored .private/.');
+await mkdir(dirname(target), { recursive: true });
+await writeFile(target, JSON.stringify(atlas), { mode: 0o600 });
+console.log(`Exported ${atlas.records.length} records and ${atlas.edges.length} relations to the private output file.`);

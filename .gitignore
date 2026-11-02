@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+.private/
+private/
+content/
+data.js
+atlas.json
+*.sqlite*
+*.log
+.DS_Store
