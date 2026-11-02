@@ -27,7 +27,7 @@ npm test
 npm run check:public
 ```
 
-测试使用 Node 自带 SQLite 和合成数据，不需要真实资料或账号。`src/worker.mjs` 使用 Cloudflare Runtime 提供的 DurableObject；测试覆盖独立的路由与存储逻辑。
+测试使用 Node 自带 SQLite 和合成数据，不需要真实资料或账号。`src/worker.mjs` 使用 Cloudflare Runtime 提供的 DurableObject；测试覆盖独立的路由与存储逻辑，并在启动检查中禁止模块加载阶段调用随机生成、加密、网络和计时器操作。
 
 ## 部署与初始化
 

@@ -1,11 +1,11 @@
 export const SESSION_COOKIE = '__Host-atlas_session';
 export const SESSION_SECONDS = 12 * 60 * 60;
 const encoder = new TextEncoder();
-const comparisonKey = crypto.subtle.importKey('raw', crypto.getRandomValues(new Uint8Array(32)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 export function hex(bytes) { return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join(''); }
 export async function digest(value) { return hex(await crypto.subtle.digest('SHA-256', encoder.encode(value))); }
 export async function equalSecret(a, b) {
-  const key = await comparisonKey;
+  // Workers only permits random generation inside a request, not module startup.
+  const key = await crypto.subtle.importKey('raw', crypto.getRandomValues(new Uint8Array(32)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
   const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(String(a)));
   return crypto.subtle.verify('HMAC', key, signature, encoder.encode(String(b)));
 }
