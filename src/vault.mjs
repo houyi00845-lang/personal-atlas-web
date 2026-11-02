@@ -1,12 +1,14 @@
-import { SESSION_SECONDS, cookieToken, sessionCookie, randomToken, digest, hashPassword, verifyPassword, equalSecret, validPassword, sameOrigin, readJson, json } from './security.mjs';
+import { SESSION_SECONDS, REMEMBER_SECONDS, RENEW_AFTER_SECONDS, cookieToken, sessionCookie, randomToken, digest, hashPassword, verifyPassword, equalSecret, validPassword, sameOrigin, readJson, json } from './security.mjs';
 
 export class Vault {
   constructor(storage, env) {
     this.storage = storage; this.sql = storage.sql; this.env = env;
     this.sql.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL, remembered INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS versions (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, created INTEGER NOT NULL);`);
+    // Preserve existing sessions and data when upgrading an already deployed vault.
+    if (!this.rows('PRAGMA table_info(sessions)').some(column => column.name === 'remembered')) this.sql.exec('ALTER TABLE sessions ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0');
   }
   rows(query, ...args) { return this.sql.exec(query, ...args).toArray(); }
   get(key) { return this.rows('SELECT value FROM settings WHERE key = ?', key)[0]?.value; }
@@ -16,15 +18,30 @@ export class Vault {
     const token = cookieToken(request);
     if (!token) return null;
     const hash = await digest(token);
-    const row = this.rows('SELECT expires FROM sessions WHERE token = ? AND expires > ?', hash, Date.now())[0];
-    return row ? { hash, expires: row.expires } : null;
+    const row = this.rows('SELECT expires, remembered FROM sessions WHERE token = ? AND expires > ?', hash, Date.now())[0];
+    return row ? { hash, token, expires: row.expires, remembered: row.remembered === 1 } : null;
   }
-  async issueSession(expectedPassword) {
+  renewSession(session) {
+    const now = Date.now();
+    if (!session.remembered || session.expires > now + (REMEMBER_SECONDS - RENEW_AFTER_SECONDS) * 1000) return null;
+    const expires = now + REMEMBER_SECONDS * 1000;
+    const updated = this.rows('UPDATE sessions SET expires = ? WHERE token = ? AND expires > ? RETURNING expires', expires, session.hash, now)[0];
+    if (!updated) return null;
+    session.expires = expires;
+    return sessionCookie(session.token, REMEMBER_SECONDS);
+  }
+  rememberedResponse(session, response) {
+    const cookie = this.renewSession(session);
+    if (cookie) response.headers.set('Set-Cookie', cookie);
+    return response;
+  }
+  async issueSession(expectedPassword, remember = true) {
     const token = randomToken(); const hash = await digest(token);
     if (this.get('password') !== expectedPassword) return null;
     this.sql.exec('DELETE FROM sessions WHERE expires <= ?', Date.now());
-    this.sql.exec('INSERT INTO sessions (token, expires) VALUES (?, ?)', hash, Date.now() + SESSION_SECONDS * 1000);
-    return sessionCookie(token);
+    const seconds = remember ? REMEMBER_SECONDS : SESSION_SECONDS;
+    this.sql.exec('INSERT INTO sessions (token, expires, remembered) VALUES (?, ?, ?)', hash, Date.now() + seconds * 1000, remember ? 1 : 0);
+    return sessionCookie(token, seconds);
   }
   async reserveAttempt(request, kind) {
     const now = Date.now(); const key = kind + ':' + await digest(request.headers.get('X-Atlas-Client') || 'unknown');
@@ -52,7 +69,7 @@ export class Vault {
       const blocked = await this.reserveAttempt(request, 'setup'); if (blocked) return blocked;
       const input = await readJson(request, 4096);
       if (typeof input.key !== 'string' || input.key.length > 512 || !await equalSecret(this.env.BOOTSTRAP_KEY, input.key)) return json({ error: '初始化密钥不正确。' }, 401);
-      if (!validPassword(input.password)) return json({ error: '请设置 14 至 256 个字符的密码。' }, 400);
+      if (!validPassword(input.password)) return json({ error: '请设置 10 至 256 个字符的密码。' }, 400);
       if (Number(this.get('setupLock') || 0) > Date.now()) return json({ error: '初始化正在进行，请稍后重试。' }, 409);
       this.put('setupLock', Date.now() + 120000);
       try {
@@ -60,7 +77,7 @@ export class Vault {
         if (this.get('password')) return json({ error: '初始化已经完成。' }, 409);
         const stored = JSON.stringify(encoded);
         this.put('password', stored);
-        const cookie = await this.issueSession(stored);
+        const cookie = await this.issueSession(stored, input.remember !== false);
         return cookie ? json({ ok: true }, 200, { 'Set-Cookie': cookie }) : json({ error: '密码状态已变化，请重新登录。' }, 401);
       } finally { this.put('setupLock', 0); }
     }
@@ -70,12 +87,15 @@ export class Vault {
       const blocked = await this.reserveAttempt(request, 'login'); if (blocked) return blocked;
       const input = await readJson(request, 4096);
       if (!await verifyPassword(input.password, encoded)) return json({ error: '密码不正确。' }, 401);
-      const cookie = await this.issueSession(encoded);
+      const cookie = await this.issueSession(encoded, input.remember !== false);
       return cookie ? json({ ok: true }, 200, { 'Set-Cookie': cookie }) : json({ error: '密码状态已变化，请重新登录。' }, 401);
     }
     const session = await this.session(request);
     if (!session) return json({ error: '请先登录。' }, 401);
-    if (path === '/api/auth/session' && method === 'GET') return json({ authenticated: true, expires: session.expires, version: this.current()?.id || 0 });
+    if (path === '/api/auth/session' && method === 'GET') {
+      const cookie = this.renewSession(session);
+      return json({ authenticated: true, expires: session.expires, remembered: session.remembered, version: this.current()?.id || 0 }, 200, cookie ? { 'Set-Cookie': cookie } : {});
+    }
     if (path === '/api/auth/logout' && method === 'POST') {
       this.sql.exec('DELETE FROM sessions WHERE token = ?', session.hash);
       return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie('', 0), 'Clear-Site-Data': '"cache", "storage"' });
@@ -83,7 +103,7 @@ export class Vault {
     if (path === '/api/auth/password' && method === 'POST') {
       const blocked = await this.reserveAttempt(request, 'password'); if (blocked) return blocked;
       const input = await readJson(request, 4096);
-      if (!validPassword(input.newPassword)) return json({ error: '新密码需为 14 至 256 个字符。' }, 400);
+      if (!validPassword(input.newPassword)) return json({ error: '新密码需为 10 至 256 个字符。' }, 400);
       const currentPassword = this.get('password');
       if (!await verifyPassword(input.password, currentPassword)) return json({ error: '当前密码不正确。' }, 401);
       const encoded = await hashPassword(input.newPassword);
@@ -93,8 +113,8 @@ export class Vault {
     }
     if (path === '/api/atlas' && method === 'GET') {
       const row = this.current();
-      if (!row) return json({ error: '还没有导入资料。', empty: true }, 404);
-      return new Response(row.payload, { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, private', 'ETag': '"' + row.id + '"' } });
+      if (!row) return this.rememberedResponse(session, json({ error: '还没有导入资料。', empty: true }, 404));
+      return this.rememberedResponse(session, new Response(row.payload, { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, private', 'ETag': '"' + row.id + '"' } }));
     }
     if (path === '/api/atlas' && method === 'POST') {
       const atlas = await readJson(request);
@@ -111,11 +131,11 @@ export class Vault {
       });
       return json({ ok: true, version: this.current().id });
     }
-    if (path === '/api/versions' && method === 'GET') return json({ versions: this.rows('SELECT id, created FROM versions ORDER BY id DESC') });
+    if (path === '/api/versions' && method === 'GET') return this.rememberedResponse(session, json({ versions: this.rows('SELECT id, created FROM versions ORDER BY id DESC') }));
     const match = path.match(/^\/api\/versions\/(\d+)$/);
     if (match && method === 'GET') {
       const row = this.rows('SELECT payload FROM versions WHERE id = ?', Number(match[1]))[0];
-      return row ? new Response(row.payload, { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, private' } }) : json({ error: '未找到此版本。' }, 404);
+      return this.rememberedResponse(session, row ? new Response(row.payload, { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store, private' } }) : json({ error: '未找到此版本。' }, 404));
     }
     return json({ error: '未找到。' }, 404);
   }

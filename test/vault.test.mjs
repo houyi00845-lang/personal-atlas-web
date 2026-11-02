@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { Vault } from '../src/vault.mjs';
 import { handleRequest } from '../src/router.mjs';
+import { REMEMBER_SECONDS, SESSION_SECONDS, digest } from '../src/security.mjs';
 
 const origin = 'https://example.test';
 const key = 'test-bootstrap-key-with-at-least-32-characters';
 const password = 'sample-long-password-for-tests';
-function fixture() {
+function fixture({ legacySessions = false } = {}) {
   const db = new DatabaseSync(':memory:');
+  if (legacySessions) db.exec('CREATE TABLE sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL);');
   const storage = {
     sql: { exec(query, ...args) {
       if (!args.length && query.trim().split(';').filter(Boolean).length > 1) { db.exec(query); return { toArray: () => [] }; }
@@ -122,5 +124,75 @@ test('parallel failed logins cannot bypass the attempt budget', async () => {
   const f = fixture(); await f.setup();
   const results = await Promise.all(Array.from({ length: 12 }, () => f.call('/api/auth/login', { method: 'POST', data: { password: 'wrong' } })));
   assert.equal(results.filter(r => r.status === 401).length, 5); assert.equal(results.filter(r => r.status === 429).length, 7);
+  f.db.close();
+});
+
+test('setup and password changes accept ten characters and reject nine', async () => {
+  const f = fixture(); const ten = 'Test-Key42'; assert.equal(ten.length, 10);
+  assert.equal((await f.call('/api/auth/setup', { method: 'POST', data: { key, password: ten.slice(1) } })).status, 400);
+  const created = await f.call('/api/auth/setup', { method: 'POST', data: { key, password: ten } });
+  assert.equal(created.status, 200); const cookie = created.headers.get('Set-Cookie').split(';')[0];
+  const next = 'New-Key123'; assert.equal(next.length, 10);
+  assert.equal((await f.call('/api/auth/password', { method: 'POST', cookie, data: { password: ten, newPassword: next.slice(1) } })).status, 400);
+  assert.equal((await f.call('/api/auth/password', { method: 'POST', cookie, data: { password: ten, newPassword: next } })).status, 200);
+  assert.equal((await f.call('/api/auth/login', { method: 'POST', data: { password: next } })).status, 200);
+  f.db.close();
+});
+
+test('devices are remembered for 180 days by default, with an explicit short-session option', async () => {
+  const f = fixture(); await f.setup();
+  const long = await f.call('/api/auth/login', { method: 'POST', data: { password } });
+  assert(long.headers.get('Set-Cookie').includes('Max-Age=' + REMEMBER_SECONDS));
+  let session = await f.vault.session(f.request('/api/auth/session', { cookie: long.headers.get('Set-Cookie').split(';')[0] }));
+  assert.equal(session.remembered, true); assert(session.expires >= Date.now() + REMEMBER_SECONDS * 1000 - 1000);
+  const short = await f.call('/api/auth/login', { method: 'POST', data: { password, remember: false } });
+  assert(short.headers.get('Set-Cookie').includes('Max-Age=' + SESSION_SECONDS));
+  const shortCookie = short.headers.get('Set-Cookie').split(';')[0];
+  session = await f.vault.session(f.request('/api/auth/session', { cookie: shortCookie })); assert.equal(session.remembered, false);
+  const checked = await f.call('/api/auth/session', { cookie: shortCookie }); assert.equal(checked.headers.get('Set-Cookie'), null);
+  f.db.close();
+});
+
+test('remembered sessions renew after one day and the browser receives the renewed cookie', async () => {
+  const f = fixture(); const cookie = await f.setup();
+  const oldExpiry = Date.now() + (REMEMBER_SECONDS - 2 * 86400) * 1000;
+  f.vault.sql.exec('UPDATE sessions SET expires = ?', oldExpiry);
+  const renewed = await f.call('/api/auth/session', { cookie }); assert.equal(renewed.status, 200);
+  assert(renewed.headers.get('Set-Cookie').includes('Max-Age=' + REMEMBER_SECONDS));
+  const body = await renewed.json(); assert(body.expires > oldExpiry); assert.equal(body.remembered, true);
+  const again = await f.call('/api/auth/session', { cookie }); assert.equal(again.headers.get('Set-Cookie'), null);
+  assert.equal(f.vault.rows('SELECT token FROM sessions').length, 1);
+  const pendingSession = await f.vault.session(f.request('/api/auth/session', { cookie }));
+  await f.call('/api/auth/logout', { method: 'POST', cookie }); pendingSession.expires = oldExpiry;
+  assert.equal(f.vault.renewSession(pendingSession), null);
+  assert.equal((await f.call('/api/auth/session', { cookie })).status, 401);
+  f.db.close();
+});
+
+test('protected HTML responses propagate cookie renewal from their authentication check', async () => {
+  const f = fixture(); const cookie = await f.setup();
+  const env = { VAULT: { idFromName: () => 'owner', get: () => f.vault }, ASSETS: { fetch: async () => new Response('PUBLIC SHELL') } };
+  for (const path of ['/', '/index.html', '/settings']) {
+    f.vault.sql.exec('UPDATE sessions SET expires = ?', Date.now() + (REMEMBER_SECONDS - 2 * 86400) * 1000);
+    const response = await handleRequest(f.request(path, { cookie }), env);
+    assert.equal(response.status, 200); assert(response.headers.get('Set-Cookie').includes('Max-Age=' + REMEMBER_SECONDS));
+    assert.equal(response.headers.get('Cache-Control'), 'no-store, private');
+  }
+  f.vault.sql.exec('UPDATE sessions SET expires = ?', 0);
+  const expired = await handleRequest(f.request('/', { cookie }), env);
+  assert.equal(expired.status, 303); assert.equal(expired.headers.get('Set-Cookie'), null);
+  f.db.close();
+});
+
+test('upgrading an old vault preserves old sessions without silently extending them', async () => {
+  const f = fixture({ legacySessions: true });
+  const token = 'b'.repeat(64); const expires = Date.now() + 3600000;
+  f.vault.sql.exec('INSERT INTO sessions (token, expires) VALUES (?, ?)', await digest(token), expires);
+  f.vault.put('compatibility-test', 'keep-existing-settings');
+  const upgraded = new Vault(f.storage, { BOOTSTRAP_KEY: key });
+  const response = await upgraded.fetch(f.request('/api/auth/session', { cookie: '__Host-atlas_session=' + token }));
+  assert.equal(response.status, 200); const body = await response.json(); assert.equal(body.expires, expires); assert.equal(body.remembered, false);
+  assert.equal(response.headers.get('Set-Cookie'), null); assert.equal(upgraded.get('compatibility-test'), 'keep-existing-settings');
+  assert.equal(upgraded.rows('PRAGMA table_info(sessions)').filter(column => column.name === 'remembered').length, 1);
   f.db.close();
 });

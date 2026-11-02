@@ -7,7 +7,7 @@
     $('#page-intro').textContent = '首次初始化完成后，这个入口将自动关闭。';
     $('#setup-key-row').hidden = false; $('#confirmation-row').hidden = false;
     $('#setup-key').required = true; $('#confirmation').required = true;
-    $('#password').autocomplete = 'new-password'; $('#password').minLength = 14;
+    $('#password').autocomplete = 'new-password'; $('#password').minLength = 10;
     $('#password-label').textContent = '设置访问密码'; $('#submit').textContent = '完成初始化 →';
   }
   fetch('/api/auth/session', { credentials: 'same-origin', cache: 'no-store' }).then(r => { if (r.ok) location.replace('/'); }).catch(() => {});
@@ -20,7 +20,7 @@
     event.preventDefault(); const button = $('#submit'); $('#message').textContent = '';
     if (setup && $('#password').value !== $('#confirmation').value) { $('#message').textContent = '两次输入的密码不一致。'; return; }
     button.disabled = true;
-    const body = { password: $('#password').value }; if (setup) body.key = $('#setup-key').value;
+    const body = { password: $('#password').value, remember: $('#remember-device').checked }; if (setup) body.key = $('#setup-key').value;
     try {
       const response = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify(body), cache: 'no-store' });
       const result = await response.json();
