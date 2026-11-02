@@ -16,6 +16,7 @@ const privacyMarkers = ['window.ATLAS_DATA = {', 'sk_live_', 'ghp_', 'github_pat
 for (const file of files) {
   if (file.endsWith('check-public.mjs')) continue;
   const text = await readFile(file, 'utf8');
+  if (file.endsWith('.dev.vars.example') && text.trim() !== 'BOOTSTRAP_KEY=""') throw new Error('Initialization secret example must remain empty');
   for (const marker of privacyMarkers) if (text.includes(marker)) throw new Error('Unexpected embedded data or secret in ' + relative(root, file));
 }
 const index = await readFile(join(root, 'public/index.html'), 'utf8');

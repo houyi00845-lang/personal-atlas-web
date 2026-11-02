@@ -4,6 +4,10 @@
 
 本仓库仅包含程序与合成测试数据，不包含真实个人记录、密码或历史资料快照。已有含真实资料的仓库应继续保持私有；不要将旧仓库直接改成公开。
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/houyi00845-lang/personal-atlas-web)
+
+在你已登录 Cloudflare 的浏览器里点击上方按钮。它会引导你创建代码副本、配置私有存储并部署网站。如果新仓库名称提示重复，可使用 `personal-atlas-live`。部署向导中的 `BOOTSTRAP_KEY` 是首次初始化密钥，请用密码管理器生成至少 32 个字符的随机值并保存；它不是你之后日常使用的访问密码，也不要发送到聊天里。网站正式使用前仍需完成下方的初始化和资料导入。
+
 ## 工作方式
 
 - Cloudflare Worker 提供网页，并验证访问权限。

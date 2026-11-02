@@ -10,5 +10,15 @@
     "check:public": "node scripts/check-public.mjs"
   },
   "devDependencies": { "wrangler": "^4.0.0" },
-  "engines": { "node": ">=22.13" }
+  "engines": { "node": ">=22.13" },
+  "cloudflare": {
+    "bindings": {
+      "BOOTSTRAP_KEY": {
+        "description": "仅用于首次初始化。请用密码管理器生成并保存至少 32 个字符的随机值；不要使用示例值，也不要发送到聊天。日常访问密码会在部署后单独设置。"
+      },
+      "VAULT": {
+        "description": "保存知识库资料、密码验证器与会话的私有存储。"
+      }
+    }
+  }
 }
